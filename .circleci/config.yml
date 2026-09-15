@@ -56,7 +56,7 @@ jobs:
               "TESTING": true,
               "LOGLEVEL": "DEBUG",
               "SECRET_KEY": "FastAPIVideoService",
-              "GENERATION_PROVIDER": "simulated",
+              "GENERATION_PROVIDER": "ai",
               "VIDEO_ANTHROPIC_MODEL": "claude-sonnet-5",
               "VIDEO_ANTHROPIC_CLASSIFIER_MODEL": "claude-haiku-4-5-20251001",
 
