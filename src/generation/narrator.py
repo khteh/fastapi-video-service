@@ -124,7 +124,8 @@ class FliteNarrator(Narrator):
                 timeout=10.0,
             )
             return "flite" in output.lower() and "unknown filter" not in output.lower()
-        except SubprocessError:
+        except SubprocessError as e:
+            logging.exception(f"ffmpeg flite check failed: {e}")
             return False
 
     async def synthesize(self, text: str, out_path: Path) -> float:
@@ -151,6 +152,7 @@ class FliteNarrator(Narrator):
         try:
             await run_subprocess(cmd, cwd=out_path.parent)
         except SubprocessError as exc:
+            logging.exception(f"flite synthesis failed: {exc}")
             raise NarrationUnavailableError(f"flite synthesis failed: {exc}") from exc
 
         with wave.open(str(out_path), "rb") as wav:
@@ -183,6 +185,7 @@ class PiperNarrator(Narrator):
         try:
             import piper  # noqa: F401
         except ImportError:
+            logging.warning("Piper TTS backend unavailable: 'piper-tts' package not installed")
             return False
         return True
 
@@ -203,6 +206,7 @@ class PiperNarrator(Narrator):
             await run_subprocess_with_stdin(cmd, cwd=out_path.parent, input_bytes=process_input)
             return await probe_duration(out_path)
         except SubprocessError as exc:
+            logging.exception(f"Piper synthesis failed: {exc}")
             raise NarrationUnavailableError(f"Piper synthesis failed: {exc}") from exc
 
 
@@ -224,6 +228,7 @@ class EdgeTTSNarrator(Narrator):
         try:
             import edge_tts  # noqa: F401
         except ImportError:
+            logging.warning("Edge TTS backend unavailable: 'edge-tts' package not installed")
             return False
         return True
 
@@ -235,6 +240,7 @@ class EdgeTTSNarrator(Narrator):
             communicate = edge_tts.Communicate(text, voice=self._voice)
             await communicate.save(str(mp3_path))
         except Exception as exc:
+            logging.exception(f"edge-tts synthesis failed: {exc}")
             # edge-tts's underlying network/websocket errors aren't a type
             # we can enumerate exhaustively (connection refused, DNS
             # failure, timeout, protocol errors, service changes, ...) —
@@ -262,6 +268,7 @@ class EdgeTTSNarrator(Narrator):
             )
             duration = await probe_duration(out_path)
         except SubprocessError as exc:
+            logging.exception(f"failed to transcode edge-tts output: {exc}")
             raise NarrationUnavailableError(f"failed to transcode edge-tts output: {exc}") from exc
         finally:
             mp3_path.unlink(missing_ok=True)
@@ -283,6 +290,7 @@ async def run_subprocess_with_stdin(cmd: list[str], cwd: Path, input_bytes: byte
     stdout, _ = await process.communicate(input=input_bytes)
     if process.returncode != 0:
         output = stdout.decode(errors="replace") if stdout else ""
+        logging.error(f"subprocess failed: {' '.join(cmd)}\n{output[-1000:]} error: {process.returncode}")
         raise SubprocessError(
             f"command exited with code {process.returncode}: {' '.join(cmd)}\n{output[-1000:]}"
         )
@@ -311,7 +319,8 @@ class FallbackNarrator(Narrator):
     async def synthesize(self, text: str, out_path: Path) -> float:
         try:
             return await self._primary.synthesize(text, out_path)
-        except NarrationUnavailableError:
+        except NarrationUnavailableError as e:
+            logging.exception(f"primary narrator {self._primary.name} failed, falling back to {self._fallback.name}: {e}")
             return await self._fallback.synthesize(text, out_path)
 
 
@@ -390,10 +399,13 @@ class _NoAIVoiceAvailableNarrator(Narrator):
     quality video than "ai" mode implies without the caller ever being
     told that happened.
     """
-
     name = "no-ai-voice-available"
-
     async def synthesize(self, text: str, out_path: Path) -> float:
+        logging.error("AI voice generation is unavailable: neither edge-tts (needs network "
+                      "and the 'edge-tts' package) nor Piper (needs VIDEO_PIPER_MODEL_PATH "
+                      "pointing at a downloaded voice model) is currently usable. Install "
+                      "and configure at least one (`uv sync --extra ai`), or submit this "
+                      "request with GENERATION_PROVIDER=simulated instead.")
         raise NarrationUnavailableError(
             "AI voice generation is unavailable: neither edge-tts (needs network "
             "and the 'edge-tts' package) nor Piper (needs VIDEO_PIPER_MODEL_PATH "
@@ -427,6 +439,7 @@ async def select_ai_narrator() -> Narrator:
     for backend_name in reversed(_AI_STRICT_PRIORITY):
         candidate = _build_candidate(backend_name)
         if not await candidate.is_available():
+            logging.warning(f"{backend_name} backend unavailable")
             continue
         chain = FallbackNarrator(primary=candidate, fallback=chain) if chain is not None else candidate
 

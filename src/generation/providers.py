@@ -61,12 +61,14 @@ from src.generation import pipeline
 from src.generation.narrator import Narrator, select_ai_narrator, select_narrator
 from src.generation.script_providers import (
     AnthropicScriptProvider,
+    FallbackScriptProvider,
     ScriptProvider,
     SimulatedScriptProvider,
 )
 from src.generation.slide_renderer import PillowSlideRenderer
 from src.generation.topic_classifier import (
     AnthropicTopicClassifier,
+    FallbackTopicClassifier,
     ClassificationResult,
     HeuristicTopicClassifier,
     TopicClassifier,
@@ -213,11 +215,13 @@ class AIProvider(_PipelineBackedProvider):
     name = "ai"
 
     def __init__(self) -> None:
-        script_provider = AnthropicScriptProvider(
-            api_key=settings.anthropic_api_key, model=settings.anthropic_model
+        script_provider = FallbackScriptProvider(
+            primary=AnthropicScriptProvider(api_key=..., model=...),
+            fallback=SimulatedScriptProvider(),
         )
-        topic_classifier = AnthropicTopicClassifier(
-            api_key=settings.anthropic_api_key, model=settings.anthropic_classifier_model
+        topic_classifier = FallbackTopicClassifier(
+            primary=AnthropicTopicClassifier(api_key=..., model=...),
+            fallback=HeuristicTopicClassifier(),
         )
         super().__init__(
             script_provider=script_provider,

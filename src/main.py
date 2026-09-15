@@ -146,6 +146,7 @@ async def request_video(payload: VideoRequest, request: Request) -> JobSubmitted
     try:
         classification = await provider.validate_topic(payload.topic)
     except ClassificationUnavailableError as exc:
+        logging.exception(f"Topic classification failed: {exc}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(

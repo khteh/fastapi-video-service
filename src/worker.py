@@ -53,11 +53,7 @@ class VideoWorkerPool:
         self._workers = [
             asyncio.create_task(self._worker_loop(i)) for i in range(self._num_workers)
         ]
-        logger.info(
-            "Started %d video generation workers using provider '%s'",
-            self._num_workers,
-            self._provider_name,
-        )
+        logger.info(f"Started {self._num_workers} video generation workers using provider '{self._provider_name}'")
 
     async def stop(self) -> None:
         for task in self._workers:
@@ -78,7 +74,8 @@ class VideoWorkerPool:
             job_id, request = await self._queue.get()
             try:
                 current = await self._state.get(job_id)
-            except KeyError:
+            except KeyError as ke:
+                logger.exception("Job %s not found: %s", job_id, ke)
                 self._queue.task_done()
                 continue
             if current.status == JobStatus.CANCELLED:
@@ -118,8 +115,8 @@ class VideoWorkerPool:
         async def on_progress(progress: int, stage: str) -> None:
             try:
                 await self._state.update_progress(job_id, stage=stage, progress=progress)
-            except KeyError:
-                pass
+            except KeyError as ke:
+                logger.exception("Job %s not found: %s", job_id, ke)
 
         work_dir = Path(tempfile.mkdtemp(prefix=f"stemvideo_{job_id}_"))
         try:
@@ -139,8 +136,8 @@ class VideoWorkerPool:
         except asyncio.CancelledError:
             try:
                 await self._state.mark_cancelled(job_id)
-            except (KeyError, InvalidTransitionError):
-                pass
+            except (KeyError, InvalidTransitionError) as e:
+                logger.exception("Job %s not found or invalid transition: %s", job_id, e)
             raise
 
         except (
@@ -166,5 +163,5 @@ class VideoWorkerPool:
     async def _safe_mark_failed(self, job_id: str, error: str) -> None:
         try:
             await self._state.mark_failed(job_id, error)
-        except KeyError:
-            pass
+        except KeyError as ke:
+            logger.exception("Job %s not found: %s", job_id, ke)
