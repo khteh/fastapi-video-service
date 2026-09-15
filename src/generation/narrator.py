@@ -152,7 +152,7 @@ class FliteNarrator(Narrator):
         try:
             await run_subprocess(cmd, cwd=out_path.parent)
         except SubprocessError as exc:
-            logging.exception(f"flite synthesis failed: {exc}")
+            logging.warning(f"flite synthesis failed: {exc}")
             raise NarrationUnavailableError(f"flite synthesis failed: {exc}") from exc
 
         with wave.open(str(out_path), "rb") as wav:
@@ -320,7 +320,7 @@ class FallbackNarrator(Narrator):
         try:
             return await self._primary.synthesize(text, out_path)
         except NarrationUnavailableError as e:
-            logging.exception(f"primary narrator {self._primary.name} failed, falling back to {self._fallback.name}: {e}")
+            logging.warning(f"primary narrator {self._primary.name} failed, falling back to {self._fallback.name}: {e}")
             return await self._fallback.synthesize(text, out_path)
 
 

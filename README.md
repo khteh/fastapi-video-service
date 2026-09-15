@@ -98,21 +98,30 @@ providers": `src/generation/providers.py` defines a `GenerationProvider`
 interface with two registered implementations, selected via the
 `GENERATION_PROVIDER` environment variable:
 
-|                             | `simulated` (default)                                                                                | `ai`                                                                                                                                                                                                                                                               |
-| --------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Script writer**           | `SimulatedScriptProvider` — deterministic template, no API calls                                     | `AnthropicScriptProvider` — real Claude API call, genuinely answers the learner's question. **No fallback**: if `ANTHROPIC_API_KEY` isn't set or the call fails, rejected immediately (see "Failure handling") rather than silently substituting template content. |
-| **Voice**                   | `flite` (offline, robotic-but-real), falling back to a tone track                                    | A real AI voice only: cloud neural TTS (`edge-tts`) or offline neural TTS (`Piper`). **No fallback** to `flite`/tone: if neither works, rejected immediately rather than silently substituting simulated-quality voice.                                            |
-| **Topic classification**    | `HeuristicTopicClassifier` — offline pattern-matching, checked synchronously before a job is created | `AnthropicTopicClassifier` — real LLM call, understands meaning, checked synchronously before a job is created. **No fallback**: unavailable means an immediate `503`, not a silent downgrade to the heuristic.                                                    |
-| **Network/API keys needed** | None                                                                                                 | `ANTHROPIC_API_KEY` and network — checked synchronously at submission time, before any job exists                                                                                                                                                                  |
-| **Used by**                 | The test suite; local dev without any setup                                                          | Deployments that want accurate, natural-sounding videos and want to _know_, not guess, when that's not what they got                                                                                                                                               |
+|                             | `simulated` (default)                                                                                | `ai`                                                                                                                                                                                                                                                                           |
+| --------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Script writer**           | `SimulatedScriptProvider` — deterministic template, no API calls                                     | `AnthropicScriptProvider` — real Claude API call, genuinely answers the learner's question. Falls back to the template if `ANTHROPIC_API_KEY` is unset or the call fails, since a missing key is a permanent, always-knowable condition and shouldn't block the whole request. |
+| **Voice**                   | `flite` (offline, robotic-but-real), falling back to a tone track                                    | A real AI voice only: cloud neural TTS (`edge-tts`) or offline neural TTS (`Piper`). **No fallback** to `flite`/tone: if neither works, rejected immediately rather than silently substituting simulated-quality voice.                                                        |
+| **Topic classification**    | `HeuristicTopicClassifier` — offline pattern-matching, checked synchronously before a job is created | `AnthropicTopicClassifier` — real LLM call, understands meaning, checked synchronously before a job is created. Falls back to the heuristic if unavailable, same reasoning as the script writer.                                                                               |
+| **Network/API keys needed** | None                                                                                                 | Nothing strictly required — script/classification degrade gracefully without `ANTHROPIC_API_KEY`; only voice generation needs network (for `edge-tts`) or a configured Piper model to produce a video at all                                                                   |
+| **Used by**                 | The test suite; local dev without any setup                                                          | Deployments that want accurate, natural-sounding videos, with network as the one hard dependency                                                                                                                                                                               |
 
-**Nothing in `ai` mode silently substitutes `simulated`-mode behavior,
-anywhere** — script content, voice, and topic classification are all used
-directly with no fallback wrapper. A caller who explicitly asks for `ai`
-either gets genuinely AI-generated output, or a clear, immediate error
-explaining exactly why not (with no job ever created for a request that
-was already known to be doomed). See "Failure handling" below for the
-full policy and the exact HTTP status each failure mode produces.
+**Content vs. voice are treated differently on purpose.** A missing
+`ANTHROPIC_API_KEY` is permanent and known in advance — refusing every
+request over it forever, when voice generation doesn't even depend on
+that key, would make `ai` mode a dead end for no good reason. So script
+writing and topic classification fall back to the offline
+template/heuristic when Anthropic is unavailable (no key, network down,
+timeout). Voice is different: it's the one thing that's supposed to set
+`ai` mode apart audibly, so it stays strict — `select_ai_narrator()` only
+ever resolves to a genuine neural voice (`edge-tts`/Piper) or fails
+clearly, never silently dropping to `flite`/tone. Net effect: with a
+working `ANTHROPIC_API_KEY`, you get real AI-authored content **and**
+natural voice; with just network and no key, you still get natural voice
+over template content, which beats a hard refusal; with neither, the
+request fails clearly rather than silently producing `simulated`-quality
+output. See "Failure handling" below for the exact behavior and HTTP
+status per scenario.
 
 Both providers share the same slide renderer and video assembler — swap
 `GENERATION_PROVIDER=simulated` for `GENERATION_PROVIDER=ai` and nothing
@@ -517,9 +526,11 @@ in. `POST /api/v1/videos` calls `provider.validate_topic(topic)`
   not real language understanding, so it won't catch nonsense made of
   real words strung together meaninglessly (e.g. `"purple democracy runs
 quickly"`) — a video would still get generated for wording like that.
-- **`ai` provider** → `AnthropicTopicClassifier` directly (no fallback —
-  see category 3 below), a genuine LLM call that understands meaning, not
-  just token shape.
+- **`ai` provider** → `AnthropicTopicClassifier` wrapped in
+  `FallbackTopicClassifier`, so a real LLM call judges meaning when
+  Anthropic is reachable, transparently falling back to the same offline
+  heuristic above when it isn't (see category 3 below for why that
+  changed from an earlier, stricter design).
 
 A rejected topic returns `422` with the classifier's reason in `detail`
 and creates **no job** — confirmed in `test_main.py`
@@ -529,34 +540,44 @@ submission.
 
 ### 3. No network or an invalid API key in `ai` mode
 
-`AnthropicTopicClassifier` is a real Anthropic API call, so
-`validate_topic()` doubles as a live health check for the same backend
-`generate()` would need a moment later. If it fails — no network, bad
-`ANTHROPIC_API_KEY`, timeout, malformed response — it raises
-`ClassificationUnavailableError`, which `main.py` turns into an immediate
-**`503 Service Unavailable`** with a clear message, again with **no job
-created**. This is deliberately a hard failure, not a fallback: `ai` mode
-never silently substitutes the offline heuristic or any other
-simulated-quality behavior — see `providers.py`'s module docstring for
-the full reasoning, and `test_main.py`
-(`test_ai_backend_unavailable_returns_503_with_no_job_created`) /
-`test_providers.py` (`test_ai_validate_topic_raises_when_backend_unavailable`)
-for the tests.
+This used to be a hard `503` at submission time for any Anthropic
+failure. It isn't anymore, for topic classification and script writing
+specifically — here's the current behavior and the reasoning:
 
-This same "fail clearly, no silent fallback" policy holds for script
-writing and voice too, which is why `AIProvider` uses
-`AnthropicScriptProvider` and `select_ai_narrator()` directly/unwrapped —
-see "Voice authenticity" above and `test_providers.py`
-(`test_ai_provider_fails_clearly_without_silently_degrading`,
-`test_ai_provider_strict_narrator_never_resolves_to_flite_or_tone`). The
-only difference from topic classification is _when_ the failure surfaces:
-classification is checked synchronously pre-job (category 2/3 above), so
-it's already covered before a job exists; script/voice failures that
-manifest mid-generation (e.g. network drops a few seconds after
-`validate_topic()` succeeded) still fail the _job_ cleanly via
-`ProviderUnavailableError`/`NarrationUnavailableError` — see "Generation
-pipeline failures" below — since a perfect pre-flight guarantee isn't
-possible in a networked system.
+- **Topic classification and script writing** (`AnthropicTopicClassifier`,
+  `AnthropicScriptProvider`) are wrapped in `FallbackTopicClassifier` /
+  `FallbackScriptProvider`. A missing `ANTHROPIC_API_KEY` is a permanent,
+  always-knowable condition — unlike a transient network blip — so rather
+  than reject every request over it, these two components transparently
+  fall back to the offline template/heuristic. Practical consequence:
+  **`POST /api/v1/videos` in `ai` mode essentially never returns a
+  synchronous `503` for a missing/invalid key anymore** — `validate_topic()`
+  always succeeds via one classifier or the other, so submission proceeds
+  to job creation. Verified in `test_providers.py`
+  (`test_ai_validate_topic_falls_back_when_backend_unavailable`).
+- **Voice** (`select_ai_narrator()`) is the one part that stays strict —
+  see "Voice authenticity" above for why. Since voice is only resolved
+  during actual job processing (not in the synchronous `validate_topic()`
+  pre-check), its failure surfaces differently: the job is created
+  (`202`), then fails asynchronously with `status: "failed"` and a clear
+  `NarrationUnavailableError` message once generation reaches the
+  narration step — not an immediate rejection at submission time.
+  Verified in `test_providers.py`
+  (`test_ai_provider_degrades_content_but_stays_strict_on_voice`,
+  `test_ai_provider_strict_narrator_never_resolves_to_flite_or_tone`).
+- **The scenario this all exists for**: no `ANTHROPIC_API_KEY`, but
+  network reachable and `edge-tts` installed (`uv sync --extra ai`) — the
+  request succeeds end-to-end with template content and genuine natural
+  narration, rather than being blocked entirely by a missing key that
+  voice generation never needed in the first place. Verified in
+  `test_providers.py`
+  (`test_ai_provider_produces_real_video_with_natural_voice_and_no_api_key`).
+
+Net result: in `ai` mode, expect a submission-time `422`/`503` only for a
+genuinely invalid topic or a completely broken environment (no
+Anthropic, no `edge-tts`, no Piper — nothing at all to work with); expect
+an async job failure specifically when content generation works
+(fallback) but no real voice backend is reachable.
 
 ### Generation pipeline failures (`src/worker.py`)
 
